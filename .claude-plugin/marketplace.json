@@ -448,7 +448,7 @@
       "description": "Export and sync Douban (豆瓣) book/movie/music/game collections to local CSV files via Frodo API. Supports full export (all history) and RSS incremental sync (recent items). Use when the user wants to export Douban reading/watching/listening/gaming history, back up their Douban data, set up incremental sync, or mentions 豆瓣/douban collections. Triggers on: 豆瓣, douban, 读书记录, 观影记录, 书影音, 导出豆瓣, export, backup, sync, collection.",
       "source": "./douban-skill",
       "strict": false,
-      "version": "1.1.0",
+      "version": "2.0.0",
       "category": "productivity",
       "keywords": [
         "douban",
