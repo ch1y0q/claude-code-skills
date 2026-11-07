@@ -2,7 +2,7 @@
 """
 Douban Collection Full Export via Frodo API (Mobile App Backend)
 
-Exports all book/movie/music/game collections to CSV files.
+Exports available book/movie/music/game collections to timestamped CSV snapshots.
 No login or cookies required — uses HMAC-SHA1 signature auth.
 
 The API key and HMAC secret are Douban's mobile app credentials, extracted from
@@ -29,6 +29,9 @@ import re
 import socket
 import sys
 import time
+import tempfile
+import shutil
+import datetime
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -157,64 +160,69 @@ def preflight_check(user_id):
     return True
 
 
+EXPORT_AUDIT = []
+
+
 def fetch_all_interests(user_id, type_name, status):
-    """Fetch all items for a given type+status combination.
-
-    Paginates through the API, checking against the reported total
-    (not page size) to handle pages with fewer items due to delisted content.
-    """
+    """Traverse API offset slots, not returned item count; fail closed."""
     api_path = f'/api/v2/user/{user_id}/interests'
-    all_items = []
-    start = 0
-    total = None
-    retries = 0
-    max_retries = 3
-    page_count = 0
-
-    while page_count < MAX_PAGES_SAFETY:
-        page_count += 1
-        ts = str(int(time.time()))
-        sig = compute_signature(api_path, ts)
-        params = {
-            'type': type_name, 'status': status,
-            'start': start, 'count': ITEMS_PER_PAGE,
-            'apiKey': API_KEY, '_ts': ts, '_sig': sig, 'os_rom': 'android',
-        }
-
-        data, status_code = fetch_json(f'{BASE_URL}{api_path}', params)
-
-        if status_code != 200:
-            retries += 1
-            if retries > max_retries:
-                print(f'  Error: HTTP {status_code} after {max_retries} retries, stopping.')
-                print(f'  See references/troubleshooting.md for common errors.')
+    all_items, seen = [], set()
+    start, total, duplicates, pages = 0, None, 0, 0
+    while pages < MAX_PAGES_SAFETY:
+        for attempt in range(4):
+            ts = str(int(time.time()))
+            params = {'type': type_name, 'status': status, 'start': start,
+                      'count': ITEMS_PER_PAGE, 'apiKey': API_KEY, '_ts': ts,
+                      '_sig': compute_signature(api_path, ts), 'os_rom': 'android'}
+            data, code = fetch_json(f'{BASE_URL}{api_path}', params)
+            if code == 200:
                 break
-            delay = 5 * (2 ** (retries - 1))
-            print(f'  HTTP {status_code}, retry {retries}/{max_retries}, waiting {delay}s...')
-            time.sleep(delay)
-            continue
-
-        retries = 0
-
+            # Error bodies can contain request credentials; do not log them.
+            print(f'  Request failed: HTTP {code}, attempt {attempt + 1}/4')
+            if attempt == 3:
+                raise RuntimeError(f'{type_name}/{status}: page {start} failed (HTTP {code}); no backup published')
+            time.sleep(5 * (2 ** attempt))
+        if not isinstance(data, dict) or type(data.get('total')) is not int or not isinstance(data.get('interests'), list):
+            raise RuntimeError('Invalid API schema; no backup published')
         if total is None:
-            total = data.get('total', 0)
-            if total == 0:
-                return []
-            print(f'  Total: {total}')
-
-        interests = data.get('interests', [])
-        if not interests:
-            break
-
-        all_items.extend(interests)
-        print(f'  Fetched {start}-{start + len(interests)} ({len(all_items)}/{total})')
-
-        if len(all_items) >= total:
-            break
-        start += len(interests)
+            total = data['total']
+            if total < 0:
+                raise RuntimeError('Invalid negative total')
+        elif data['total'] != total:
+            raise RuntimeError('Collection changed during export; no backup published')
+        if 'start' in data and data['start'] != start:
+            raise RuntimeError('API returned unexpected offset')
+        if 'count' in data and data['count'] != ITEMS_PER_PAGE:
+            raise RuntimeError('API changed page size; pagination needs review')
+        items = data['interests']
+        if len(items) > ITEMS_PER_PAGE:
+            raise RuntimeError('API page exceeds requested size; no backup published')
+        for item in items:
+            sid = item.get('subject', {}).get('id')
+            if sid is None or str(sid) == '':
+                raise RuntimeError('Missing subject identity; no backup published')
+            key = str(sid)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            all_items.append(item)
+        if len(all_items) > total:
+            raise RuntimeError('Unique records exceed reported total; no backup published')
+        pages += 1
+        print(f'  Offset {start}, returned {len(items)}, unique {len(all_items)}, reported {total}')
+        # Probe one page beyond the reported range to confirm exhaustion.
+        if start >= total:
+            if items:
+                raise RuntimeError('Unexpected records beyond total; no backup published')
+            EXPORT_AUDIT.append({'type': type_name, 'status': status,
+                'reported_total': total, 'unique_exported': len(all_items),
+                'unavailable_slots': total-len(all_items), 'duplicates_removed': duplicates,
+                'pages': pages, 'terminal_empty_offset': start})
+            return all_items
+        start += ITEMS_PER_PAGE
         time.sleep(PAGE_DELAY)
-
-    return all_items
+    raise RuntimeError('Pagination safety limit reached; no backup published')
 
 
 def extract_rating(interest):
@@ -264,6 +272,7 @@ def write_csv(filepath, rows):
 
 
 def main():
+    EXPORT_AUDIT.clear()
     user_id = os.environ.get('DOUBAN_USER', '').strip()
     if not user_id:
         print('Error: DOUBAN_USER environment variable is required')
@@ -280,7 +289,6 @@ def main():
         sys.exit(1)
 
     output_dir = get_output_dir(user_id)
-    os.makedirs(output_dir, exist_ok=True)
     print(f'Douban Export for user: {user_id}')
     print(f'Output directory: {output_dir}\n')
 
@@ -311,14 +319,26 @@ def main():
 
         time.sleep(CATEGORY_DELAY)
 
-    # Write CSV files
-    print('--- Writing CSV files ---')
-    for filename, rows in file_data.items():
-        filepath = os.path.join(output_dir, filename)
-        write_csv(filepath, rows)
-        print(f'  {filename}: {len(rows)} rows')
-
-    print(f'\nDone! {grand_total} total items exported to {output_dir}')
+    # Publish only complete snapshots. Never overwrite an existing backup.
+    os.makedirs(output_dir, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix='.pending-', dir=output_dir)
+    snapshot = os.path.join(output_dir, 'snapshot-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'))
+    try:
+        print('--- Writing verified snapshot ---')
+        for filename, rows in file_data.items():
+            keys = [(r['url'], r['status']) for r in rows]
+            if len(keys) != len(set(keys)):
+                raise RuntimeError('Duplicate CSV records; no backup published')
+            write_csv(os.path.join(staging, filename), rows)
+            print(f'  {filename}: {len(rows)} rows')
+        with open(os.path.join(staging, 'manifest.json'), 'w', encoding='utf-8') as f:
+            json.dump({'user_id': user_id, 'total_rows': grand_total, 'categories': EXPORT_AUDIT,
+                       'coverage': 'all API offset slots traversed; unavailable slots are not exported'}, f, ensure_ascii=False, indent=2)
+        os.rename(staging, snapshot)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    print(f'\nDone! {grand_total} unique items exported to {snapshot}')
 
 
 if __name__ == '__main__':
