@@ -53,20 +53,21 @@ def compute_signature(url_path, timestamp):
 Some pages return fewer than the requested `count` (e.g., 48 instead of 50). This happens
 when items have been delisted from Douban's catalog but still count toward the total.
 
-**This was our biggest silent bug.** The first version of the export script used
-`len(page_items) < count_per_page` as the stop condition. Result: only 499 out of 639
-books were exported, with no error message. The fix:
+Advance `start` by the requested page size, not by the number of returned
+records. Short or empty interior pages still consume offset slots; advancing by
+returned count can overlap windows and duplicate records, while stopping on an
+empty interior page can miss later records.
 
-```python
-# WRONG: stops early when a page has fewer items due to delisted content
-if len(interests) < count_per_page:
-    break
+Traverse all offsets through the reported total, then require an empty page at or
+beyond that total. Deduplicate subject IDs within each type/status. Stop with an
+error instead of publishing if requests exhaust retries, totals change, metadata
+is inconsistent, a subject identity is missing, or the safety limit is reached.
+Retry the full export later after a transient failure. Review an API schema or
+pagination change before changing the guards.
 
-# CORRECT: check against the total count reported by the API
-if len(all_items) >= total:
-    break
-start += len(interests)  # advance by actual count, not page_size
-```
+Inspect the snapshot manifest for exported counts and unavailable slots. A
+successful traversal proves coverage of the API offset range, not recovery of
+private or delisted records. Keep previous snapshots when a run fails.
 
 ### Rating Scale Confusion
 
