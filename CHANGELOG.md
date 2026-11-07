@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **douban-skill** (v1.1.0 → v2.0.0): Fix offset-window pagination and duplicate records; reject incomplete or inconsistent exports. Publish timestamped snapshots with manifests instead of overwriting root CSVs (breaking output-path change), preserve existing backups, and document RSS working-copy migration. Verify with offline pagination and snapshot regression tests.
+
 - **frontend-visual-qa** (v1.21.36 → v1.21.37): Add media-state journey cases for playback geometry, seeking, tall-image notices, exact source/preview identity and native downloaded-file validation. Change type: sampled acceptance-recipe extension; existing audit profiles and browser owners remain intact.
 
 - **pdf-creator** (`daymade-docs` v1.29.4 → v1.29.5): Correct the documented lint/preview/checklist order and automation opt-out; keep maintainer testing linked to its canonical QA, runtime and Python contracts.
